@@ -4,7 +4,6 @@ import hmac
 import base64
 import hashlib
 import secrets
-import sqlite3
 import smtplib
 import textwrap
 
@@ -13,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 
 import streamlit as st
+from supabase import create_client
 
 try:
     from groq import Groq
@@ -132,34 +132,25 @@ footer { visibility:hidden; }
 
 # =========================================================
 # DATABASE AND PASSWORD SECURITY
-# =========================================================
+# =========================a===============================
 
-def connect_db():
-    connection = sqlite3.connect(DB_PATH, timeout=10)
-    connection.execute("PRAGMA foreign_keys = ON")
-    return connection
+@st.cache_resource
+def get_supabase_client():
+    """Create a server-side Supabase client using Streamlit Secrets."""
+    url = get_secret_value("SUPABASE_URL")
+    # Keep the server-side secret key only in Streamlit Secrets; never expose it in UI.
+    key = get_secret_value("SUPABASE_SECRET_KEY")
+    if not url or not key:
+        raise RuntimeError(
+            "Supabase is not configured. Add SUPABASE_URL and SUPABASE_SECRET_KEY "
+            "to Streamlit Cloud → Settings → Secrets."
+        )
+    return create_client(url, key)
 
 
 def init_db():
-    with connect_db() as connection:
-        connection.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT NOT NULL UNIQUE,
-                email TEXT NOT NULL UNIQUE,
-                salt TEXT NOT NULL,
-                password_hash TEXT NOT NULL,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        connection.execute("""
-            CREATE TABLE IF NOT EXISTS password_reset_codes (
-                email TEXT PRIMARY KEY,
-                code_hash TEXT NOT NULL,
-                expires_at TEXT NOT NULL,
-                attempts INTEGER NOT NULL DEFAULT 0
-            )
-        """)
+    # Tables are created once in the Supabase SQL Editor, not at app startup.
+    return None
 
 
 def hash_password(password, salt=None):
@@ -204,30 +195,35 @@ def register_user(username, email, password):
 
     salt_text, password_hash = hash_password(password)
     try:
-        with connect_db() as connection:
-            connection.execute(
-                "INSERT INTO users (username, email, salt, password_hash) VALUES (?, ?, ?, ?)",
-                (username, email, salt_text, password_hash),
-            )
+        db = get_supabase_client()
+        # Friendly duplicate check; database unique constraints remain the final guard.
+        existing_username = db.table("students").select("id").ilike("username", username).limit(1).execute().data
+        existing_email = db.table("students").select("id").ilike("email", email).limit(1).execute().data
+        if existing_username or existing_email:
+            return False, "That username or email is already registered."
+        db.table("students").insert({
+            "username": username,
+            "email": email,
+            "salt": salt_text,
+            "password_hash": password_hash,
+        }).execute()
         return True, "Account created successfully. You can now sign in."
-    except sqlite3.IntegrityError:
-        return False, "That username or email is already registered."
+    except Exception:
+        return False, "We couldn't create your account. Check the Supabase connection and try again."
 
 
 def authenticate_user(identifier, password):
     identifier = identifier.strip()
-    with connect_db() as connection:
-        user = connection.execute(
-            """
-            SELECT id, username, email, salt, password_hash
-            FROM users
-            WHERE username = ? COLLATE NOCASE OR email = ? COLLATE NOCASE
-            """,
-            (identifier, identifier),
-        ).fetchone()
-
-    if user and verify_password(password, user[3], user[4]):
-        return {"id": user[0], "username": user[1], "email": user[2]}
+    try:
+        db = get_supabase_client()
+        rows = db.table("students").select("id, username, email, salt, password_hash").ilike("username", identifier).limit(1).execute().data
+        if not rows:
+            rows = db.table("students").select("id, username, email, salt, password_hash").ilike("email", identifier).limit(1).execute().data
+        user = rows[0] if rows else None
+        if user and verify_password(password, user["salt"], user["password_hash"]):
+            return {"id": user["id"], "username": user["username"], "email": user["email"]}
+    except Exception:
+        return None
     return None
 
 
@@ -272,32 +268,31 @@ def request_password_reset(email):
     if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
         return False, "Enter a valid email address."
 
-    with connect_db() as connection:
-        row = connection.execute(
-            "SELECT email FROM users WHERE email = ? COLLATE NOCASE", (email,)
-        ).fetchone()
+    try:
+        db = get_supabase_client()
+        rows = db.table("students").select("email").ilike("email", email).limit(1).execute().data
+    except Exception:
+        return False, "We couldn't connect to the account database. Please try again later."
 
-    if not row:
-        # Avoid disclosing whether an account exists.
+    if not rows:
         return True, "If that email is registered, a reset code will be sent."
 
     code = f"{secrets.randbelow(1_000_000):06d}"
     code_hash = hashlib.sha256(f"{email}:{code}".encode()).hexdigest()
     expiry = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
-
-    with connect_db() as connection:
-        connection.execute(
-            """
-            INSERT OR REPLACE INTO password_reset_codes (email, code_hash, expires_at, attempts)
-            VALUES (?, ?, ?, 0)
-            """,
-            (email, code_hash, expiry),
-        )
+    try:
+        db.table("password_reset_codes").upsert({
+            "email": email, "code_hash": code_hash, "expires_at": expiry, "attempts": 0
+        }, on_conflict="email").execute()
+    except Exception:
+        return False, "We couldn't save the reset request. Please try again."
 
     ok, message = send_reset_code(email, code)
     if not ok:
-        with connect_db() as connection:
-            connection.execute("DELETE FROM password_reset_codes WHERE email = ?", (email,))
+        try:
+            db.table("password_reset_codes").delete().eq("email", email).execute()
+        except Exception:
+            pass
         return False, message
     return True, message
 
@@ -309,45 +304,41 @@ def complete_password_reset(email, code, new_password):
     if len(new_password) > 128:
         return False, "Password is too long."
 
-    with connect_db() as connection:
-        row = connection.execute(
-            "SELECT code_hash, expires_at, attempts FROM password_reset_codes WHERE email = ?",
-            (email,),
-        ).fetchone()
+    try:
+        db = get_supabase_client()
+        rows = db.table("password_reset_codes").select("code_hash, expires_at, attempts").eq("email", email).limit(1).execute().data
+        row = rows[0] if rows else None
+    except Exception:
+        return False, "We couldn't connect to the account database. Please try again."
 
     if not row:
         return False, "Request a new reset code first."
-    if row[2] >= 5:
-        with connect_db() as connection:
-            connection.execute("DELETE FROM password_reset_codes WHERE email = ?", (email,))
+    if row["attempts"] >= 5:
+        db.table("password_reset_codes").delete().eq("email", email).execute()
         return False, "Too many incorrect attempts. Request a new code."
 
     try:
-        expiry = datetime.fromisoformat(row[1])
-    except ValueError:
+        expiry = datetime.fromisoformat(row["expires_at"].replace("Z", "+00:00"))
+        if expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
         expiry = datetime.min.replace(tzinfo=timezone.utc)
 
     if datetime.now(timezone.utc) > expiry:
-        with connect_db() as connection:
-            connection.execute("DELETE FROM password_reset_codes WHERE email = ?", (email,))
+        db.table("password_reset_codes").delete().eq("email", email).execute()
         return False, "That code has expired. Request a new one."
 
     expected = hashlib.sha256(f"{email}:{code.strip()}".encode()).hexdigest()
-    if not hmac.compare_digest(expected, row[0]):
-        with connect_db() as connection:
-            connection.execute(
-                "UPDATE password_reset_codes SET attempts = attempts + 1 WHERE email = ?",
-                (email,),
-            )
+    if not hmac.compare_digest(expected, row["code_hash"]):
+        db.table("password_reset_codes").update({"attempts": row["attempts"] + 1}).eq("email", email).execute()
         return False, "Incorrect code. Check your email and try again."
 
     salt_text, password_hash = hash_password(new_password)
-    with connect_db() as connection:
-        connection.execute(
-            "UPDATE users SET salt = ?, password_hash = ? WHERE email = ? COLLATE NOCASE",
-            (salt_text, password_hash, email),
-        )
-        connection.execute("DELETE FROM password_reset_codes WHERE email = ?", (email,))
+    try:
+        db.table("students").update({"salt": salt_text, "password_hash": password_hash}).ilike("email", email).execute()
+        db.table("password_reset_codes").delete().eq("email", email).execute()
+    except Exception:
+        return False, "We couldn't update your password. Please try again."
     return True, "Password updated. You can now sign in."
 
 
@@ -492,7 +483,6 @@ def render_auth_page():
                         st.session_state.authenticated = True
                         st.session_state.user = user
                         st.session_state.page = "Overview"
-                        st.session_state.dashboard_navigation = "Overview"
                         st.session_state.messages = []
                         st.rerun()
                     else:
@@ -541,8 +531,8 @@ def render_auth_page():
 FAQS = [
     {"title": "Admissions", "keywords": ["admission", "apply", "application", "eligibility"],
      "answer": "Check the official college admission notification for eligibility, required documents, and application deadlines."},
-    {"title": "Fees and Scholarships", "keywords": ["fees", "fee", "scholarship", "payment", "refund", "financial aid", "tuition", "installment", "installments", "education loan", "mahadbt", "e-scholarship"],
-     "answer": "I can help you understand fee payments and scholarship applications.\n\n**Fees:** Check your college's official fee notice or student portal for the amount, due date, accepted payment methods, and whether instalments or extensions are allowed. Save the receipt after paying. If a payment fails, keep the transaction/reference ID and contact the college accounts office before paying again.\n\n**Scholarships:** Check eligibility, application dates, income/category/course requirements (where applicable), renewal rules, and required documents on the official scholarship portal and your college scholarship office. Commonly requested documents may include an admission/bonafide certificate, fee receipt, marksheets, identity and bank details, and an income certificate, but the exact list depends on the scheme. Never share passwords, PINs, or OTPs.\n\nI don't know your college's exact fees or which scheme you qualify for yet. Tell me your college, course/year, and whether you need fee-payment help or a scholarship, and I can guide you more specifically. Verify amounts and deadlines with official sources."},
+    {"title": "Fees and Scholarships", "keywords": ["fees", "fee", "scholarship", "payment", "refund"],
+     "answer": "Fees and scholarship eligibility vary by institution. Check official notices and portals and keep payment receipts."},
     {"title": "Examinations", "keywords": ["exam", "hall ticket", "result", "revaluation", "kt"],
      "answer": "For exam timetables, hall tickets, results, and revaluation, check your college or university examination portal."},
     {"title": "Attendance", "keywords": ["attendance", "absent", "shortage"],
@@ -565,54 +555,20 @@ def get_api_key():
 
 
 def fallback_answer(question):
-    """Helpful offline responses for all CampusHelps areas when the AI API fails."""
     q = question.lower().strip()
+    if q in ["hi", "hello", "hey", "good morning", "good evening"]:
+        return "Hi! 👋 I'm CampusHelps. Ask me about academics, college services, programming, careers, or general questions."
 
-    if q in ["hi", "hello", "hey", "good morning", "good afternoon", "good evening"]:
-        return "Hi! 👋 I'm CampusHelps. I can help with admissions, fees and scholarships, exams, academics, placements, campus facilities, student documents, and study or coding questions."
-
-    # Match the most relevant built-in guidance first.
     best_item = None
     best_score = 0
     for item in FAQS:
-        score = sum(1 for keyword in item.get("keywords", []) if keyword in q)
+        score = sum(1 for keyword in item["keywords"] if keyword in q)
         if score > best_score:
             best_item, best_score = item, score
 
     if best_item:
         return best_item["answer"]
-
-    # Broader offline coverage for module cards and common student-service questions.
-    responses = [
-        (["hostel", "accommodation", "room", "mess"], "For hostel, accommodation, or mess queries, check the official student/hostel office notice for availability, fees, eligibility, application dates, and required documents. Contact the hostel office for current rules; these vary by institution."),
-        (["library", "book", "reading room"], "For library services, check the library portal or ask the librarian about opening hours, book availability, borrowing limits, renewals, and overdue fines."),
-        (["transport", "bus", "parking", "vehicle"], "For campus transport or parking, check the official transport notice for routes, timings, passes, fees, and rules. Confirm the latest schedule with the campus transport office."),
-        (["wifi", "wi-fi", "internet", "network", "computer lab", "laboratory", "lab"], "For Wi-Fi, internet, or lab access, check the campus IT/lab instructions and ask the lab in-charge or IT support. Do not share your account password or OTP with anyone."),
-        (["medical", "health", "clinic", "emergency", "counselling", "counseling"], "For campus medical or counselling services, contact the official campus health centre or student-support office and check its working hours. If there is an immediate emergency, contact local emergency services or campus security."),
-        (["id card", "identity card", "lost card"], "For a student ID card, contact the college office or student section. Ask about the replacement procedure, required proof, any fee, and expected processing time."),
-        (["timetable", "schedule", "lecture", "class"], "For class timetables and lecture changes, check the official department notice board, student portal, or class representative. Confirm the latest version because schedules can change."),
-        (["syllabus", "notes", "unit", "question paper", "previous year", "pyq"], "For syllabus, notes, and previous-year question papers, start with the official course outline, faculty materials, and department/student portal. Share your subject and unit if you want help preparing or understanding a topic."),
-        (["project", "mini project", "final year", "report", "seminar", "ppt", "presentation"], "I can help break a project, seminar, report, or presentation into manageable steps. Share your topic, required format, deadline, and what you have completed so far."),
-        (["coding", "python", "java", "c++", " c ", "program", "error", "debug"], "I can help with programming concepts and debugging. Share the language, code, exact error message, and expected output. Remove passwords, API keys, and other private information before sharing."),
-        (["internship", "placement", "resume", "cv", "interview", "job", "career"], "For placements and internships, check official Training and Placement Cell announcements and verify eligibility and deadlines. I can also help with your resume, interview practice, aptitude, and technical preparation."),
-        (["scholarship", "mahadbt", "e-scholarship", "fee", "fees", "payment", "refund", "installment", "installment", "loan"], "For fees or scholarships, verify the current amount, eligibility, deadline, and document list through the official college office and relevant scholarship portal. Keep receipts and application IDs. Never share passwords, PINs, or OTPs. Tell me your college, course/year, and the exact issue for more targeted guidance."),
-        (["admission", "admissions", "apply", "application", "eligibility", "enrol", "enroll"], "For admissions, check the official college/university notification for eligibility, application dates, fees, document requirements, and selection steps. Requirements vary by course and institution, so verify them with the admissions office."),
-        (["exam", "examination", "hall ticket", "result", "revaluation", "kt", "backlog"], "For exam forms, timetables, hall tickets, results, revaluation, or backlog rules, check the official college/university examination portal and department notices. Confirm deadlines with the examination section."),
-        (["certificate", "bonafide", "bonafide", "transcript", "migration", "document", "documents"], "For student certificates and documents, contact the college office/student section. Ask which application form, identity proof, supporting documents, fees, and processing time are required."),
-        (["sports", "gym", "club", "event", "facility", "facilities", "auditorium", "canteen"], "For campus facilities, clubs, sports, or events, check official student notices or contact the relevant campus office. Availability, timings, booking rules, and fees may change."),
-        (["attendance", "absent", "shortage", "leave"], "Attendance and leave rules depend on your institution and course. Check the current student handbook or department notice, and speak with your class coordinator if you have a shortage or need to request leave."),
-        (["gate", "study plan", "study", "viva", "assignment", "learn", "explain"], "I can help you understand concepts, prepare a study plan, practise viva questions, and solve assignments step by step. Tell me the subject/topic and whether you want a short explanation or a detailed answer."),
-    ]
-    for keywords, answer in responses:
-        if any(keyword in q for keyword in keywords):
-            return answer
-
-    return (
-        "I can still help, but the AI service may be unavailable right now. "
-        "For the most useful guidance, tell me what you need help with and include the relevant course/year or service. "
-        "For official college-specific fees, deadlines, policies, contacts, and availability, verify details with your college portal or office. "
-        "Please do not share passwords, PINs, OTPs, or API keys."
-    )
+    return "I don't have a reliable built-in answer for that question. Try asking about exams, fees, scholarships, placements, or study help."
 
 
 def get_ai_reply(messages):
@@ -641,10 +597,25 @@ def get_ai_reply(messages):
         answer = response.choices[0].message.content
         if answer and answer.strip():
             return answer.strip(), "Campus AI"
-        return fallback_answer(messages[-1]["content"]), "Knowledge base fallback"
+        return fallback_answer(messages[-1]["content"]), "Knowledge-base fallback"
     except Exception:
-        # Keep the chat useful even when the API key, network, quota, or model call fails.
-        return fallback_answer(messages[-1]["content"]), "Knowledge base fallback"
+        return (
+            fallback_answer(messages[-1]["content"])
+            + "\n\n_AI service is temporarily unavailable, so this is a built-in guidance answer. Please try again shortly for a more detailed AI response._",
+            "Knowledge-base fallback",
+        )
+
+
+# =========================================================
+# NAVIGATION HELPERS
+# =========================================================
+
+def navigate_to_chat(question):
+    """Open the AI chat and queue a topic-specific question."""
+    st.session_state.pending_prompt = question
+    st.session_state.page = "Ask CampusHelps"
+    # Keep the keyed sidebar radio in sync with programmatic navigation.
+    st.session_state.dashboard_navigation = "Ask CampusHelps"
 
 
 # =========================================================
@@ -714,9 +685,6 @@ if not st.session_state.authenticated:
 
 # =========================================================
 # SIDEBAR AND NAVIGATION
-if "dashboard_navigation" not in st.session_state:
-    st.session_state.dashboard_navigation = st.session_state.get("page", "Overview")
-
 # =========================================================
 
 with st.sidebar:
@@ -736,11 +704,9 @@ with st.sidebar:
     if current_page not in pages:
         current_page = "Overview"
 
-    # Keep the radio widget unkeyed so homepage buttons can safely update
-    # st.session_state.dashboard_navigation without modifying a live widget key.
     page = st.radio(
         "Navigation", pages, index=pages.index(current_page),
-        label_visibility="collapsed",
+        key="dashboard_navigation", label_visibility="collapsed",
     )
     st.session_state.page = page
     st.divider()
@@ -756,7 +722,6 @@ with st.sidebar:
         st.session_state.messages = []
         st.session_state.pending_prompt = None
         st.session_state.page = "Ask CampusHelps"
-        st.session_state.dashboard_navigation = "Ask CampusHelps"
         st.rerun()
 
     if st.button("↪ Sign Out", use_container_width=True):
@@ -765,7 +730,6 @@ with st.sidebar:
         st.session_state.messages = []
         st.session_state.pending_prompt = None
         st.session_state.page = "Overview"
-        st.session_state.dashboard_navigation = "Overview"
         st.session_state.auth_view = "Sign In"
         st.session_state.pop("reset_email", None)
         st.rerun()
@@ -828,26 +792,22 @@ if page == "Overview":
                     <div class="service-desc">{description}</div>
                 </div>
             """, unsafe_allow_html=True)
-            if st.button("Open module →", key=f"module_{index}", use_container_width=True):
-                st.session_state.pending_prompt = f"Help me with {title.lower()}."
-                st.session_state.page = "Ask CampusHelps"
-                st.session_state.dashboard_navigation = "Ask CampusHelps"
-                st.rerun()
+            st.button(
+                "Open module →", key=f"module_{index}", use_container_width=True,
+                on_click=navigate_to_chat,
+                args=(f"Help me with {title.lower()}. Give practical steps and mention what must be verified with my college.",),
+            )
 
     st.markdown("## Quick actions")
     first, second = st.columns(2)
     with first:
-        if st.button("↗ Explain a technical concept", use_container_width=True):
-            st.session_state.pending_prompt = "Explain a technical concept in simple words."
-            st.session_state.page = "Ask CampusHelps"
-            st.session_state.dashboard_navigation = "Ask CampusHelps"
-            st.rerun()
+        st.button("↗ Explain a technical concept", use_container_width=True,
+                  on_click=navigate_to_chat,
+                  args=("Explain a technical concept in simple words, with a simple example.",))
     with second:
-        if st.button("↗ Help me plan my studies", use_container_width=True):
-            st.session_state.pending_prompt = "Help me plan my studies."
-            st.session_state.page = "Ask CampusHelps"
-            st.session_state.dashboard_navigation = "Ask CampusHelps"
-            st.rerun()
+        st.button("↗ Help me plan my studies", use_container_width=True,
+                  on_click=navigate_to_chat,
+                  args=("Help me plan my studies. Ask about my subjects and available study time if needed.",))
 
 
 # =========================================================
@@ -869,11 +829,11 @@ elif page == "Student Services":
     for index, item in enumerate(FAQS):
         with st.expander("⌘  " + item["title"]):
             st.write(item["answer"])
-            if st.button(f"Ask AI about {item['title']}", key=f"faq_{index}"):
-                st.session_state.pending_prompt = f"Tell me about {item['title'].lower()}."
-                st.session_state.page = "Ask CampusHelps"
-                st.session_state.dashboard_navigation = "Ask CampusHelps"
-                st.rerun()
+            st.button(
+                f"Ask AI about {item['title']}", key=f"faq_{index}",
+                on_click=navigate_to_chat,
+                args=(f"Tell me about {item['title'].lower()}. Give clear, practical, beginner-friendly guidance, steps to follow, and what to verify with official college sources.",),
+            )
 
 
 # =========================================================
