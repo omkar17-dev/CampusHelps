@@ -699,7 +699,7 @@ with st.sidebar:
     """, unsafe_allow_html=True)
     st.markdown('<div class="eyebrow">● SYSTEM NAVIGATION</div>', unsafe_allow_html=True)
 
-    pages = ["Overview", "Ask CampusHelps", "Student Services", "About"]
+    pages = ["Overview", "Ask CampusHelps", "Student Services","My Profile", "About"]
     current_page = st.session_state.page
     if current_page not in pages:
         current_page = "Overview"
@@ -839,6 +839,135 @@ elif page == "Student Services":
 # =========================================================
 # ABOUT PAGE
 # =========================================================
+
+elif page == "My Profile":
+    st.title("👤 My Profile")
+    st.caption("Manage your student information.")
+
+    try:
+        supabase = get_supabase_client()
+        user_id = st.session_state.user["id"]
+
+        response = (
+            supabase.table("students")
+            .select(
+                "full_name, department, academic_year, division, phone"
+            )
+            .eq("id", user_id)
+            .single()
+            .execute()
+        )
+
+        profile = response.data or {}
+
+        departments = [
+            "Select Department",
+            "Computer Engineering",
+            "Information Technology",
+            "Electronics",
+            "Mechanical",
+            "Civil",
+            "Other",
+        ]
+
+        years = [
+            "Select Year",
+            "First Year",
+            "Second Year",
+            "Third Year",
+            "Final Year",
+        ]
+
+        saved_department = profile.get("department") or ""
+        saved_year = profile.get("academic_year") or ""
+
+        department_index = (
+            departments.index(saved_department)
+            if saved_department in departments
+            else 0
+        )
+
+        year_index = (
+            years.index(saved_year)
+            if saved_year in years
+            else 0
+        )
+
+        with st.form("student_profile_form"):
+            full_name = st.text_input(
+                "Full Name",
+                value=profile.get("full_name") or "",
+                placeholder="Enter your full name",
+            )
+
+            department = st.selectbox(
+                "Department",
+                departments,
+                index=department_index,
+            )
+
+            academic_year = st.selectbox(
+                "Academic Year",
+                years,
+                index=year_index,
+            )
+
+            division = st.text_input(
+                "Division",
+                value=profile.get("division") or "",
+                placeholder="e.g. A",
+            )
+
+            phone = st.text_input(
+                "Phone Number",
+                value=profile.get("phone") or "",
+                placeholder="Enter your phone number",
+            )
+
+            save_profile = st.form_submit_button(
+                "💾 Save Profile",
+                use_container_width=True,
+            )
+
+        if save_profile:
+            if not full_name.strip():
+                st.warning("Please enter your full name.")
+            elif phone.strip() and not phone.strip().isdigit():
+                st.warning("Please enter a valid phone number using digits only.")
+            elif phone.strip() and len(phone.strip()) != 10:
+                st.warning("Please enter a 10-digit phone number.")
+            else:
+                update_data = {
+                    "full_name": full_name.strip(),
+                    "department": (
+                        department
+                        if department != "Select Department"
+                        else None
+                    ),
+                    "academic_year": (
+                        academic_year
+                        if academic_year != "Select Year"
+                        else None
+                    ),
+                    "division": division.strip() or None,
+                    "phone": phone.strip() or None,
+                }
+
+                (
+                    supabase.table("students")
+                    .update(update_data)
+                    .eq("id", user_id)
+                    .execute()
+                )
+
+                st.success("Your profile has been saved successfully!")
+                st.rerun()
+
+    except Exception:
+        st.error(
+            "Unable to load or save your profile. "
+            "Please check your Supabase connection and try again."
+        )
 
 elif page == "About":
     st.markdown('<div class="eyebrow">SYSTEM / PROJECT INFORMATION</div>', unsafe_allow_html=True)
