@@ -622,11 +622,21 @@ def navigate_to_chat(question):
 # CHAT PAGE
 # =========================================================
 
-def render_chat():
-    st.markdown('<div class="eyebrow">SYSTEM / STUDENT SUPPORT / CHAT</div>', unsafe_allow_html=True)
-    st.title("AI Command Center")
-    st.write("Ask about academics, college services, technology, careers, or general topics.")
 
+def render_chat():
+    import streamlit.components.v1 as components
+
+    st.markdown(
+        '<div class="eyebrow">SYSTEM / STUDENT SUPPORT / CHAT</div>',
+        unsafe_allow_html=True,
+    )
+    st.title("AI Command Center")
+    st.write(
+        "Ask about academics, college services, technology, "
+        "careers, or general topics."
+    )
+
+    # Show suggested prompts when there is no conversation.
     if not st.session_state.messages:
         st.markdown("""
             <div class="panel">
@@ -642,36 +652,100 @@ def render_chat():
             "How can I prepare for internships?",
             "Explain Python functions with an example.",
         ]
+
         columns = st.columns(2)
+
         for index, suggestion in enumerate(suggestions):
             with columns[index % 2]:
-                if st.button("↗ " + suggestion, key=f"prompt_{index}", use_container_width=True):
+                if st.button(
+                    "↗ " + suggestion,
+                    key=f"prompt_{index}",
+                    use_container_width=True,
+                ):
                     st.session_state.pending_prompt = suggestion
                     st.rerun()
 
+    # Display all previous questions and answers.
     for message in st.session_state.messages:
         avatar = "🤖" if message["role"] == "assistant" else "👤"
+
         with st.chat_message(message["role"], avatar=avatar):
             st.markdown(message["content"])
 
+            if message["role"] == "assistant":
+                source = message.get("source")
+                if source:
+                    st.caption(f"Response source: {source}")
+
+    # Read typed prompts and suggested prompts.
     pending = st.session_state.pending_prompt
     st.session_state.pending_prompt = None
+
     prompt = st.chat_input("Ask CampusHelps anything...")
+
     if pending:
         prompt = pending
 
     if prompt and prompt.strip():
         prompt = prompt.strip()
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user", avatar="👤"):
-            st.markdown(prompt)
-        with st.chat_message("assistant", avatar="🤖"):
-            with st.spinner("Processing request..."):
-                answer, source = get_ai_reply(st.session_state.messages)
-            st.markdown(answer)
-            st.caption(f"Response source: {source}")
-        st.session_state.messages.append({"role": "assistant", "content": answer})
+
+        # Save the user's question.
+        st.session_state.messages.append({
+            "role": "user",
+            "content": prompt,
+        })
+
+        try:
+            with st.spinner("CampusHelps is preparing your answer..."):
+                answer, source = get_ai_reply(
+                    st.session_state.messages
+                )
+
+            # Save the answer and its source.
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": answer,
+                "source": source,
+            })
+
+        except Exception:
+            st.error(
+                "Campus AI could not generate a response. "
+                "Please try again."
+            )
+            st.rerun()
+
+        # Re-render the complete conversation.
         st.rerun()
+
+    # Attempt to scroll the page to the newest chat message.
+    components.html(
+        """
+        <script>
+        function scrollToLatestMessage() {
+            try {
+                const doc = window.parent.document;
+                const messages = doc.querySelectorAll(
+                    '[data-testid="stChatMessage"]'
+                );
+
+                if (messages.length > 0) {
+                    messages[messages.length - 1].scrollIntoView({
+                        behavior: "smooth",
+                        block: "end"
+                    });
+                }
+            } catch (error) {
+                // The chat remains usable if scrolling is unavailable.
+            }
+        }
+
+        setTimeout(scrollToLatestMessage, 300);
+        </script>
+        """,
+        height=0,
+    )
+
 
 
 # =========================================================
