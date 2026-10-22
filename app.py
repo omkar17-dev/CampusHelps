@@ -615,27 +615,8 @@ def navigate_to_chat(question):
     """Open the AI chat and queue a topic-specific question."""
     st.session_state.pending_prompt = question
     st.session_state.page = "Ask CampusHelps"
+    # Keep the keyed sidebar radio in sync with programmatic navigation.
     st.session_state.dashboard_navigation = "Ask CampusHelps"
-
-
-def start_new_chat():
-    """Clear the current conversation and open a fresh chat."""
-    st.session_state.messages = []
-    st.session_state.pending_prompt = None
-    st.session_state.page = "Ask CampusHelps"
-    st.session_state.dashboard_navigation = "Ask CampusHelps"
-
-
-def sign_out():
-    """Clear authenticated session data and return to the sign-in screen."""
-    st.session_state.authenticated = False
-    st.session_state.user = None
-    st.session_state.messages = []
-    st.session_state.pending_prompt = None
-    st.session_state.page = "Overview"
-    st.session_state.dashboard_navigation = "Overview"
-    st.session_state.auth_view = "Sign In"
-    st.session_state.pop("reset_email", None)
 
 
 # =========================================================
@@ -693,7 +674,7 @@ def render_chat():
         st.session_state.messages.append({"role": "assistant", "content": answer})
         st.rerun()
 
-    # Keep the latest chat message in view after a rerun.
+    # Scroll to the latest chat message after each render, without changing the chat UI.
     components.html(
         """
         <script>
@@ -703,14 +684,15 @@ def render_chat():
                 const messages = doc.querySelectorAll('[data-testid="stChatMessage"]');
                 if (messages.length > 0) {
                     messages[messages.length - 1].scrollIntoView({
-                        behavior: "smooth", block: "start"
+                        behavior: "smooth",
+                        block: "start"
                     });
                 }
             } catch (error) {
-                // Scrolling is optional and must not interrupt the app.
+                // Scrolling is optional; the chat remains usable if blocked.
             }
         }
-        setTimeout(scrollToLatestMessage, 300);
+        setTimeout(scrollToLatestMessage, 250);
         </script>
         """,
         height=0,
@@ -721,15 +703,7 @@ def render_chat():
 # AUTHENTICATION GATE
 # =========================================================
 
-user = st.session_state.get("user")
-if (
-    not st.session_state.get("authenticated", False)
-    or not isinstance(user, dict)
-    or not user.get("id")
-    or not user.get("username")
-):
-    st.session_state.authenticated = False
-    st.session_state.user = None
+if not st.session_state.authenticated:
     render_auth_page()
     st.stop()
 
@@ -762,25 +736,31 @@ with st.sidebar:
     st.session_state.page = page
     st.divider()
 
-    user = st.session_state.get("user")
-    if isinstance(user, dict) and user.get("username"):
-        st.write(f"Signed in as {user['username']}")
-    else:
-        st.write("Signed in to CampusHelps")
-
+    user = st.session_state.user
+    st.write(f"Signed in as {user['username']}")
     if get_api_key() and Groq is not None:
         st.success("AI assistant enabled")
     else:
         st.info("Knowledge-base mode")
 
-    st.button(
-        "＋ New Chat", use_container_width=True,
-        on_click=start_new_chat, key="sidebar_new_chat",
-    )
-    st.button(
-        "↪ Sign Out", use_container_width=True,
-        on_click=sign_out, key="sidebar_sign_out",
-    )
+    if st.button("＋ New Chat", use_container_width=True):
+        # Keep the existing chat page and its existing interface; only clear the conversation.
+        st.session_state.messages = []
+        st.session_state.pending_prompt = None
+        st.session_state.page = "Ask CampusHelps"
+        st.session_state.dashboard_navigation = "Ask CampusHelps"
+        st.rerun()
+
+    if st.button("↪ Sign Out", use_container_width=True):
+        st.session_state.authenticated = False
+        st.session_state.user = None
+        st.session_state.messages = []
+        st.session_state.pending_prompt = None
+        st.session_state.page = "Overview"
+        st.session_state.dashboard_navigation = "Overview"
+        st.session_state.auth_view = "Sign In"
+        st.session_state.pop("reset_email", None)
+        st.rerun()
 
     st.divider()
     st.caption("Verify official college information with trusted sources. Never share your password in chat.")
@@ -847,7 +827,7 @@ if page == "Overview":
             )
 
     st.markdown("## Quick actions")
-    first, second, third = st.columns(3)
+    first, second = st.columns(2)
     with first:
         st.button("↗ Explain a technical concept", use_container_width=True,
                   on_click=navigate_to_chat,
@@ -856,9 +836,6 @@ if page == "Overview":
         st.button("↗ Help me plan my studies", use_container_width=True,
                   on_click=navigate_to_chat,
                   args=("Help me plan my studies. Ask about my subjects and available study time if needed.",))
-    with third:
-        st.button("＋ New Chat", use_container_width=True,
-                  on_click=start_new_chat, key="dashboard_new_chat")
 
 
 # =========================================================
@@ -900,18 +877,18 @@ elif page == "About":
             <h3>An AI-powered college helpdesk</h3>
             <p style="line-height:1.8;">
                 CampusHelps combines student-support guidance with a Groq-powered AI assistant.
-                It uses Python, Streamlit, and Supabase to manage registered student accounts.
+                It uses Python, Streamlit, and a local SQLite database for registered accounts.
             </p>
         </div>
     """, unsafe_allow_html=True)
     st.markdown("### Account security")
     st.markdown("""
 - Passwords are stored as salted password hashes, not plain text.
-- Student account records are stored in Supabase; database access is handled through its client library.
+- Database operations use parameterised SQL queries.
 - Student accounts are separate from the Groq API key.
 - Email verification is used for password recovery.
     """)
-    st.info("Keep API keys and database credentials in Streamlit secrets. Verify Supabase table permissions and never expose service-role credentials in client-side code.")
+    st.info("For public deployment, configure secrets securely and use persistent database storage. Local SQLite storage may not persist reliably across hosted app restarts or redeployments.")
 
 
 # =========================================================
