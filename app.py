@@ -12,6 +12,9 @@ from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 
 import streamlit as st
+
+import streamlit.components.v1 as components
+
 from supabase import create_client
 
 try:
