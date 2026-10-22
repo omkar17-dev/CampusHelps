@@ -12,9 +12,7 @@ from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 
 import streamlit as st
-
 import streamlit.components.v1 as components
-
 from supabase import create_client
 
 try:
@@ -135,7 +133,7 @@ footer { visibility:hidden; }
 
 # =========================================================
 # DATABASE AND PASSWORD SECURITY
-# =========================a===============================
+# =========================================================
 
 @st.cache_resource
 def get_supabase_client():
@@ -574,78 +572,39 @@ def fallback_answer(question):
     return "I don't have a reliable built-in answer for that question. Try asking about exams, fees, scholarships, placements, or study help."
 
 
-
 def get_ai_reply(messages):
     api_key = get_api_key()
-
-    if not api_key:
-        return (
-            "Groq API key is missing. Check GROQ_API_KEY in Streamlit Cloud Secrets.",
-            "Configuration error",
-        )
-
-    if Groq is None:
-        return (
-            "The Groq Python package is not available. Check that groq is listed in requirements.txt.",
-            "Dependency error",
-        )
+    if not api_key or Groq is None:
+        return fallback_answer(messages[-1]["content"]), "Knowledge base"
 
     try:
-        client = Groq(api_key=api_key, timeout=30.0)
-
-        conversation = [
-            {
-                "role": "system",
-                "content": (
-                    "You are CampusHelps, a friendly student-support assistant. "
-                    "Answer questions about academics, programming, technology, "
-                    "study plans, careers, and student services in clear, "
-                    "beginner-friendly language. Never invent college-specific "
-                    "fees, deadlines, policies, results, or official contacts. "
-                    "Tell users to verify institution-specific information "
-                    "through official sources. Never ask for passwords or bank details."
-                ),
-            }
-        ]
-
-        # Send only valid chat messages to Groq.
-        for message in messages[-12:]:
-            if message.get("role") in ("user", "assistant"):
-                content = message.get("content", "")
-                if isinstance(content, str) and content.strip():
-                    conversation.append({
-                        "role": message["role"],
-                        "content": content,
-                    })
-
+        client = Groq(api_key=api_key)
+        conversation = [{
+            "role": "system",
+            "content": (
+                "You are CampusHelps, a friendly student-support assistant. "
+                "Answer general questions about academics, programming, technology, study plans, careers, and student services. "
+                "Use clear, practical, beginner-friendly language. Never invent college-specific fees, deadlines, policies, results, or official contact details. "
+                "Tell users to verify institution-specific information through official sources. Never ask users to share passwords or bank details."
+            ),
+        }]
+        conversation.extend(messages[-12:])
         response = client.chat.completions.create(
             model="openai/gpt-oss-20b",
             messages=conversation,
             temperature=0.3,
             max_completion_tokens=1200,
         )
-
         answer = response.choices[0].message.content
-
         if answer and answer.strip():
             return answer.strip(), "Campus AI"
-
+        return fallback_answer(messages[-1]["content"]), "Knowledge-base fallback"
+    except Exception:
         return (
-            "The AI model returned an empty response. Please try again.",
-            "Empty AI response",
+            fallback_answer(messages[-1]["content"])
+            + "\n\n_AI service is temporarily unavailable, so this is a built-in guidance answer. Please try again shortly for a more detailed AI response._",
+            "Knowledge-base fallback",
         )
-
-    except Exception as error:
-        # Log the actual error in Streamlit Cloud logs.
-        print(f"CampusHelps Groq error: {type(error).__name__}: {error}")
-
-        return (
-            "Campus AI could not complete your request. "
-            f"Error type: {type(error).__name__}. "
-            "Please check the Streamlit Cloud logs for details.",
-            "AI error",
-        )
-
 
 
 # =========================================================
@@ -656,29 +615,38 @@ def navigate_to_chat(question):
     """Open the AI chat and queue a topic-specific question."""
     st.session_state.pending_prompt = question
     st.session_state.page = "Ask CampusHelps"
-    # Keep the keyed sidebar radio in sync with programmatic navigation.
     st.session_state.dashboard_navigation = "Ask CampusHelps"
+
+
+def start_new_chat():
+    """Clear the current conversation and open a fresh chat."""
+    st.session_state.messages = []
+    st.session_state.pending_prompt = None
+    st.session_state.page = "Ask CampusHelps"
+    st.session_state.dashboard_navigation = "Ask CampusHelps"
+
+
+def sign_out():
+    """Clear authenticated session data and return to the sign-in screen."""
+    st.session_state.authenticated = False
+    st.session_state.user = None
+    st.session_state.messages = []
+    st.session_state.pending_prompt = None
+    st.session_state.page = "Overview"
+    st.session_state.dashboard_navigation = "Overview"
+    st.session_state.auth_view = "Sign In"
+    st.session_state.pop("reset_email", None)
 
 
 # =========================================================
 # CHAT PAGE
 # =========================================================
 
-
 def render_chat():
-    import streamlit.components.v1 as components
-
-    st.markdown(
-        '<div class="eyebrow">SYSTEM / STUDENT SUPPORT / CHAT</div>',
-        unsafe_allow_html=True,
-    )
+    st.markdown('<div class="eyebrow">SYSTEM / STUDENT SUPPORT / CHAT</div>', unsafe_allow_html=True)
     st.title("AI Command Center")
-    st.write(
-        "Ask about academics, college services, technology, "
-        "careers, or general topics."
-    )
+    st.write("Ask about academics, college services, technology, careers, or general topics.")
 
-    # Show suggested prompts when there is no conversation.
     if not st.session_state.messages:
         st.markdown("""
             <div class="panel">
@@ -694,101 +662,77 @@ def render_chat():
             "How can I prepare for internships?",
             "Explain Python functions with an example.",
         ]
-
         columns = st.columns(2)
-
         for index, suggestion in enumerate(suggestions):
             with columns[index % 2]:
-                if st.button(
-                    "↗ " + suggestion,
-                    key=f"prompt_{index}",
-                    use_container_width=True,
-                ):
+                if st.button("↗ " + suggestion, key=f"prompt_{index}", use_container_width=True):
                     st.session_state.pending_prompt = suggestion
                     st.rerun()
 
-    # Display all previous questions and answers.
     for message in st.session_state.messages:
         avatar = "🤖" if message["role"] == "assistant" else "👤"
-
         with st.chat_message(message["role"], avatar=avatar):
             st.markdown(message["content"])
 
-            if message["role"] == "assistant":
-                source = message.get("source")
-                if source:
-                    st.caption(f"Response source: {source}")
-
-    # Read typed prompts and suggested prompts.
     pending = st.session_state.pending_prompt
     st.session_state.pending_prompt = None
-
     prompt = st.chat_input("Ask CampusHelps anything...")
-
     if pending:
         prompt = pending
 
     if prompt and prompt.strip():
         prompt = prompt.strip()
-
-        # Save the user's question.
-        st.session_state.messages.append({
-            "role": "user",
-            "content": prompt,
-        })
-
-        try:
-            with st.spinner("CampusHelps is preparing your answer..."):
-                answer, source = get_ai_reply(
-                    st.session_state.messages
-                )
-
-            # Save the answer and its source.
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": answer,
-                "source": source,
-            })
-
-        except Exception:
-            st.error(
-                "Campus AI could not generate a response. "
-                "Please try again."
-            )
-            st.rerun()
-
-        # Re-render the complete conversation.
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user", avatar="👤"):
+            st.markdown(prompt)
+        with st.chat_message("assistant", avatar="🤖"):
+            with st.spinner("Processing request..."):
+                answer, source = get_ai_reply(st.session_state.messages)
+            st.markdown(answer)
+            st.caption(f"Response source: {source}")
+        st.session_state.messages.append({"role": "assistant", "content": answer})
         st.rerun()
 
-    # Attempt to scroll the page to the newest chat message.
-   
-
-components.html(
-    """
-    <script>
-    function scrollToLatestMessage() {
-        try {
-            const doc = window.parent.document;
-            const messages = doc.querySelectorAll(
-                '[data-testid="stChatMessage"]'
-            );
-
-            if (messages.length > 0) {
-                messages[messages.length - 1].scrollIntoView({
-                    behavior: "smooth",
-                    block: "start"
-                });
+    # Keep the latest chat message in view after a rerun.
+    components.html(
+        """
+        <script>
+        function scrollToLatestMessage() {
+            try {
+                const doc = window.parent.document;
+                const messages = doc.querySelectorAll('[data-testid="stChatMessage"]');
+                if (messages.length > 0) {
+                    messages[messages.length - 1].scrollIntoView({
+                        behavior: "smooth", block: "start"
+                    });
+                }
+            } catch (error) {
+                // Scrolling is optional and must not interrupt the app.
             }
-        } catch (error) {
-            // Scrolling is optional.
         }
-    }
+        setTimeout(scrollToLatestMessage, 300);
+        </script>
+        """,
+        height=0,
+    )
 
-    setTimeout(scrollToLatestMessage, 300);
-    </script>
-    """,
-    height=0,
-)
+
+# =========================================================
+# AUTHENTICATION GATE
+# =========================================================
+
+user = st.session_state.get("user")
+if (
+    not st.session_state.get("authenticated", False)
+    or not isinstance(user, dict)
+    or not user.get("id")
+    or not user.get("username")
+):
+    st.session_state.authenticated = False
+    st.session_state.user = None
+    render_auth_page()
+    st.stop()
+
 
 # =========================================================
 # SIDEBAR AND NAVIGATION
@@ -806,7 +750,7 @@ with st.sidebar:
     """, unsafe_allow_html=True)
     st.markdown('<div class="eyebrow">● SYSTEM NAVIGATION</div>', unsafe_allow_html=True)
 
-    pages = ["Overview", "Ask CampusHelps", "Student Services","My Profile", "About"]
+    pages = ["Overview", "Ask CampusHelps", "Student Services", "About"]
     current_page = st.session_state.page
     if current_page not in pages:
         current_page = "Overview"
@@ -818,42 +762,25 @@ with st.sidebar:
     st.session_state.page = page
     st.divider()
 
-    
+    user = st.session_state.get("user")
+    if isinstance(user, dict) and user.get("username"):
+        st.write(f"Signed in as {user['username']}")
+    else:
+        st.write("Signed in to CampusHelps")
 
-user = st.session_state.get("user")
+    if get_api_key() and Groq is not None:
+        st.success("AI assistant enabled")
+    else:
+        st.info("Knowledge-base mode")
 
-if isinstance(user, dict) and user.get("username"):
-    st.write(f"Signed in as {user['username']}")
-else:
-    st.write("Signed in to CampusHelps")
-
-if get_api_key() and Groq is not None:
-    st.success("AI assistant enabled")
-else:
-    st.info("Knowledge-base mode")
-
-
-    
-if st.button("＋ New Chat", use_container_width=True):
-    st.session_state.messages = []
-    st.session_state.pending_prompt = None
-    st.session_state.page = "Ask CampusHelps"
-
-    if "dashboard_navigation" in st.session_state:
-        st.session_state.dashboard_navigation = "Ask CampusHelps"
-
-    st.rerun()
-
-
-    if st.button("↪ Sign Out", use_container_width=True):
-        st.session_state.authenticated = False
-        st.session_state.user = None
-        st.session_state.messages = []
-        st.session_state.pending_prompt = None
-        st.session_state.page = "Overview"
-        st.session_state.auth_view = "Sign In"
-        st.session_state.pop("reset_email", None)
-        st.rerun()
+    st.button(
+        "＋ New Chat", use_container_width=True,
+        on_click=start_new_chat, key="sidebar_new_chat",
+    )
+    st.button(
+        "↪ Sign Out", use_container_width=True,
+        on_click=sign_out, key="sidebar_sign_out",
+    )
 
     st.divider()
     st.caption("Verify official college information with trusted sources. Never share your password in chat.")
@@ -920,7 +847,7 @@ if page == "Overview":
             )
 
     st.markdown("## Quick actions")
-    first, second = st.columns(2)
+    first, second, third = st.columns(3)
     with first:
         st.button("↗ Explain a technical concept", use_container_width=True,
                   on_click=navigate_to_chat,
@@ -929,6 +856,9 @@ if page == "Overview":
         st.button("↗ Help me plan my studies", use_container_width=True,
                   on_click=navigate_to_chat,
                   args=("Help me plan my studies. Ask about my subjects and available study time if needed.",))
+    with third:
+        st.button("＋ New Chat", use_container_width=True,
+                  on_click=start_new_chat, key="dashboard_new_chat")
 
 
 # =========================================================
@@ -961,135 +891,6 @@ elif page == "Student Services":
 # ABOUT PAGE
 # =========================================================
 
-elif page == "My Profile":
-    st.title("👤 My Profile")
-    st.caption("Manage your student information.")
-
-    try:
-        supabase = get_supabase_client()
-        user_id = st.session_state.user["id"]
-
-        response = (
-            supabase.table("students")
-            .select(
-                "full_name, department, academic_year, division, phone"
-            )
-            .eq("id", user_id)
-            .single()
-            .execute()
-        )
-
-        profile = response.data or {}
-
-        departments = [
-            "Select Department",
-            "Computer Engineering",
-            "Information Technology",
-            "Electronics",
-            "Mechanical",
-            "Civil",
-            "Other",
-        ]
-
-        years = [
-            "Select Year",
-            "First Year",
-            "Second Year",
-            "Third Year",
-            "Final Year",
-        ]
-
-        saved_department = profile.get("department") or ""
-        saved_year = profile.get("academic_year") or ""
-
-        department_index = (
-            departments.index(saved_department)
-            if saved_department in departments
-            else 0
-        )
-
-        year_index = (
-            years.index(saved_year)
-            if saved_year in years
-            else 0
-        )
-
-        with st.form("student_profile_form"):
-            full_name = st.text_input(
-                "Full Name",
-                value=profile.get("full_name") or "",
-                placeholder="Enter your full name",
-            )
-
-            department = st.selectbox(
-                "Department",
-                departments,
-                index=department_index,
-            )
-
-            academic_year = st.selectbox(
-                "Academic Year",
-                years,
-                index=year_index,
-            )
-
-            division = st.text_input(
-                "Division",
-                value=profile.get("division") or "",
-                placeholder="e.g. A",
-            )
-
-            phone = st.text_input(
-                "Phone Number",
-                value=profile.get("phone") or "",
-                placeholder="Enter your phone number",
-            )
-
-            save_profile = st.form_submit_button(
-                "💾 Save Profile",
-                use_container_width=True,
-            )
-
-        if save_profile:
-            if not full_name.strip():
-                st.warning("Please enter your full name.")
-            elif phone.strip() and not phone.strip().isdigit():
-                st.warning("Please enter a valid phone number using digits only.")
-            elif phone.strip() and len(phone.strip()) != 10:
-                st.warning("Please enter a 10-digit phone number.")
-            else:
-                update_data = {
-                    "full_name": full_name.strip(),
-                    "department": (
-                        department
-                        if department != "Select Department"
-                        else None
-                    ),
-                    "academic_year": (
-                        academic_year
-                        if academic_year != "Select Year"
-                        else None
-                    ),
-                    "division": division.strip() or None,
-                    "phone": phone.strip() or None,
-                }
-
-                (
-                    supabase.table("students")
-                    .update(update_data)
-                    .eq("id", user_id)
-                    .execute()
-                )
-
-                st.success("Your profile has been saved successfully!")
-                st.rerun()
-
-    except Exception:
-        st.error(
-            "Unable to load or save your profile. "
-            "Please check your Supabase connection and try again."
-        )
-
 elif page == "About":
     st.markdown('<div class="eyebrow">SYSTEM / PROJECT INFORMATION</div>', unsafe_allow_html=True)
     st.title("Built for student support.")
@@ -1099,18 +900,18 @@ elif page == "About":
             <h3>An AI-powered college helpdesk</h3>
             <p style="line-height:1.8;">
                 CampusHelps combines student-support guidance with a Groq-powered AI assistant.
-                It uses Python, Streamlit, and a local SQLite database for registered accounts.
+                It uses Python, Streamlit, and Supabase to manage registered student accounts.
             </p>
         </div>
     """, unsafe_allow_html=True)
     st.markdown("### Account security")
     st.markdown("""
 - Passwords are stored as salted password hashes, not plain text.
-- Database operations use parameterised SQL queries.
+- Student account records are stored in Supabase; database access is handled through its client library.
 - Student accounts are separate from the Groq API key.
 - Email verification is used for password recovery.
     """)
-    st.info("For public deployment, configure secrets securely and use persistent database storage. Local SQLite storage may not persist reliably across hosted app restarts or redeployments.")
+    st.info("Keep API keys and database credentials in Streamlit secrets. Verify Supabase table permissions and never expose service-role credentials in client-side code.")
 
 
 # =========================================================
