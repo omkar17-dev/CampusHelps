@@ -571,39 +571,78 @@ def fallback_answer(question):
     return "I don't have a reliable built-in answer for that question. Try asking about exams, fees, scholarships, placements, or study help."
 
 
+
 def get_ai_reply(messages):
     api_key = get_api_key()
-    if not api_key or Groq is None:
-        return fallback_answer(messages[-1]["content"]), "Knowledge base"
+
+    if not api_key:
+        return (
+            "Groq API key is missing. Check GROQ_API_KEY in Streamlit Cloud Secrets.",
+            "Configuration error",
+        )
+
+    if Groq is None:
+        return (
+            "The Groq Python package is not available. Check that groq is listed in requirements.txt.",
+            "Dependency error",
+        )
 
     try:
-        client = Groq(api_key=api_key)
-        conversation = [{
-            "role": "system",
-            "content": (
-                "You are CampusHelps, a friendly student-support assistant. "
-                "Answer general questions about academics, programming, technology, study plans, careers, and student services. "
-                "Use clear, practical, beginner-friendly language. Never invent college-specific fees, deadlines, policies, results, or official contact details. "
-                "Tell users to verify institution-specific information through official sources. Never ask users to share passwords or bank details."
-            ),
-        }]
-        conversation.extend(messages[-12:])
+        client = Groq(api_key=api_key, timeout=30.0)
+
+        conversation = [
+            {
+                "role": "system",
+                "content": (
+                    "You are CampusHelps, a friendly student-support assistant. "
+                    "Answer questions about academics, programming, technology, "
+                    "study plans, careers, and student services in clear, "
+                    "beginner-friendly language. Never invent college-specific "
+                    "fees, deadlines, policies, results, or official contacts. "
+                    "Tell users to verify institution-specific information "
+                    "through official sources. Never ask for passwords or bank details."
+                ),
+            }
+        ]
+
+        # Send only valid chat messages to Groq.
+        for message in messages[-12:]:
+            if message.get("role") in ("user", "assistant"):
+                content = message.get("content", "")
+                if isinstance(content, str) and content.strip():
+                    conversation.append({
+                        "role": message["role"],
+                        "content": content,
+                    })
+
         response = client.chat.completions.create(
             model="openai/gpt-oss-20b",
             messages=conversation,
             temperature=0.3,
             max_completion_tokens=1200,
         )
+
         answer = response.choices[0].message.content
+
         if answer and answer.strip():
             return answer.strip(), "Campus AI"
-        return fallback_answer(messages[-1]["content"]), "Knowledge-base fallback"
-    except Exception:
+
         return (
-            fallback_answer(messages[-1]["content"])
-            + "\n\n_AI service is temporarily unavailable, so this is a built-in guidance answer. Please try again shortly for a more detailed AI response._",
-            "Knowledge-base fallback",
+            "The AI model returned an empty response. Please try again.",
+            "Empty AI response",
         )
+
+    except Exception as error:
+        # Log the actual error in Streamlit Cloud logs.
+        print(f"CampusHelps Groq error: {type(error).__name__}: {error}")
+
+        return (
+            "Campus AI could not complete your request. "
+            f"Error type: {type(error).__name__}. "
+            "Please check the Streamlit Cloud logs for details.",
+            "AI error",
+        )
+
 
 
 # =========================================================
