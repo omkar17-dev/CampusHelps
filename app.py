@@ -818,8 +818,14 @@ with st.sidebar:
     st.session_state.page = page
     st.divider()
 
-    user = st.session_state.user
+    
+user = st.session_state.get("user")
+
+if isinstance(user, dict) and user.get("username"):
     st.write(f"Signed in as {user['username']}")
+else:
+    st.write("Signed in to CampusHelps")
+
     if get_api_key() and Groq is not None:
         st.success("AI assistant enabled")
     else:
