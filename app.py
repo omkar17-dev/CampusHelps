@@ -759,6 +759,7 @@ def render_chat():
 
     # Attempt to scroll the page to the newest chat message.
    
+
 components.html(
     """
     <script>
@@ -776,7 +777,7 @@ components.html(
                 });
             }
         } catch (error) {
-            // Keep the chat usable if scrolling is unavailable.
+            // Scrolling is optional.
         }
     }
 
@@ -785,16 +786,6 @@ components.html(
     """,
     height=0,
 )
-
-
-# =========================================================
-# AUTHENTICATION GATE
-# =========================================================
-
-if not st.session_state.authenticated:
-    render_auth_page()
-    st.stop()
-
 
 # =========================================================
 # SIDEBAR AND NAVIGATION
