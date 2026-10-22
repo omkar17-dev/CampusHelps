@@ -819,6 +819,7 @@ with st.sidebar:
     st.divider()
 
     
+
 user = st.session_state.get("user")
 
 if isinstance(user, dict) and user.get("username"):
@@ -826,10 +827,11 @@ if isinstance(user, dict) and user.get("username"):
 else:
     st.write("Signed in to CampusHelps")
 
-    if get_api_key() and Groq is not None:
-        st.success("AI assistant enabled")
-    else:
-        st.info("Knowledge-base mode")
+if get_api_key() and Groq is not None:
+    st.success("AI assistant enabled")
+else:
+    st.info("Knowledge-base mode")
+
 
     
 if st.button("＋ New Chat", use_container_width=True):
