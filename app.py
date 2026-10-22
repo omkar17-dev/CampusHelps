@@ -758,33 +758,33 @@ def render_chat():
         st.rerun()
 
     # Attempt to scroll the page to the newest chat message.
-    components.html(
-        """
-        <script>
-        function scrollToLatestMessage() {
-            try {
-                const doc = window.parent.document;
-                const messages = doc.querySelectorAll(
-                    '[data-testid="stChatMessage"]'
-                );
+   
+components.html(
+    """
+    <script>
+    function scrollToLatestMessage() {
+        try {
+            const doc = window.parent.document;
+            const messages = doc.querySelectorAll(
+                '[data-testid="stChatMessage"]'
+            );
 
-                if (messages.length > 0) {
-                    messages[messages.length - 1].scrollIntoView({
-                        behavior: "smooth",
-                        block: "end"
-                    });
-                }
-            } catch (error) {
-                // The chat remains usable if scrolling is unavailable.
+            if (messages.length > 0) {
+                messages[messages.length - 1].scrollIntoView({
+                    behavior: "smooth",
+                    block: "start"
+                });
             }
+        } catch (error) {
+            // Keep the chat usable if scrolling is unavailable.
         }
+    }
 
-        setTimeout(scrollToLatestMessage, 300);
-        </script>
-        """,
-        height=0,
-    )
-
+    setTimeout(scrollToLatestMessage, 300);
+    </script>
+    """,
+    height=0,
+)
 
 
 # =========================================================
@@ -831,11 +831,17 @@ with st.sidebar:
     else:
         st.info("Knowledge-base mode")
 
-    if st.button("＋ New Chat", use_container_width=True):
-        st.session_state.messages = []
-        st.session_state.pending_prompt = None
-        st.session_state.page = "Ask CampusHelps"
-        st.rerun()
+    
+if st.button("＋ New Chat", use_container_width=True):
+    st.session_state.messages = []
+    st.session_state.pending_prompt = None
+    st.session_state.page = "Ask CampusHelps"
+
+    if "dashboard_navigation" in st.session_state:
+        st.session_state.dashboard_navigation = "Ask CampusHelps"
+
+    st.rerun()
+
 
     if st.button("↪ Sign Out", use_container_width=True):
         st.session_state.authenticated = False
